@@ -25,6 +25,11 @@ class JobStatus(str, enum.Enum):
     MERGING = "MERGING"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
+    # Progressive playback uchun yangi holatlar
+    SPLITTING = "SPLITTING"           # Video chunk'larga bo'linmoqda
+    PROCESSING_CHUNKS = "PROCESSING_CHUNKS"  # Chunk'lar parallel qayta ishlanmoqda
+    PARTIALLY_READY = "PARTIALLY_READY"  # Birinchi chunk tayyor, playback mumkin
+    PUBLISHING = "PUBLISHING"         # HLS segmentlar publish qilinmoqda
 
 
 class User(Base):
@@ -109,6 +114,12 @@ class DubbingJob(Base):
     dubbed_audio_path = Column(String(500))
     output_video_path = Column(String(500))
     output_video_url = Column(String(500))
+
+    # Progressive playback uchun qo'shimcha maydonlar
+    hls_playlist_url = Column(String(500), nullable=True)  # HLS playlist URL
+    chunks_ready = Column(Integer, default=0)  # Tayyor chunk'lar soni
+    chunks_total = Column(Integer, default=0)  # Jami chunk'lar soni
+    first_playable_at = Column(DateTime, nullable=True)  # Birinchi chunk tayyor bo'lgan vaqt
 
     error_message = Column(Text)
     error_code = Column(String(50), nullable=True)  # masalan: VIDEO_UNAVAILABLE, TRANSCRIBE_FAILED, TIMEOUT

@@ -31,24 +31,60 @@ def _has_nvenc() -> bool:
     - NVIDIA GPU (T4, A5000, A10G, RTX 4090, va h.k.)
     - FFmpeg NVENC support (--enable-nvenc bilan build qilingan)
     - NVIDIA driver 418+ version
+
+    Tekshirish usuli:
+    1. FFmpeg encoder ro'yxatida 'h264_nvenc' mavjudligini tekshirish
+    2. Haqiqiy encoding sinovini o'tkazish (1 sekundlik test video)
+    3. Agar xatolik chiqsa — NVENC ishlamaydi, CPU ga fallback
     """
     if not settings.ENABLE_NVENC:
         logger.info("NVENC disabled via config (ENABLE_NVENC=False)")
         return False
 
+    # 1-qadam: FFmpeg encoder ro'yxatini tekshirish
     try:
         result = subprocess.run(
             ["ffmpeg", "-encoders"],
             capture_output=True, text=True, timeout=10,
         )
-        has = "h264_nvenc" in result.stdout
-        if has:
-            logger.info("✅ NVENC available — GPU encoding enabled")
-        else:
-            logger.warning("❌ NVENC not found in FFmpeg — falling back to CPU encoding")
-        return has
+        if "h264_nvenc" not in result.stdout:
+            logger.warning("❌ NVENC not found in FFmpeg encoders — falling back to CPU encoding")
+            return False
     except Exception as exc:
-        logger.warning(f"NVENC check failed: {exc} — falling back to CPU encoding")
+        logger.warning(f"NVENC encoder check failed: {exc} — falling back to CPU encoding")
+        return False
+
+    # 2-qadam: Haqiqiy encoding sinovini o'tkazish
+    # FFmpeg NVENC support bor, lekin GPU yo'q bo'lishi mumkin
+    try:
+        import tempfile
+        import os
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+            test_output = f.name
+        try:
+            test_result = subprocess.run(
+                [
+                    "ffmpeg", "-y",
+                    "-f", "lavfi", "-i", "testsrc=duration=1:size=320x240:rate=25",
+                    "-c:v", "h264_nvenc", "-preset", "p1",
+                    "-frames:v", "1",
+                    test_output,
+                ],
+                capture_output=True, text=True, timeout=15,
+            )
+            if test_result.returncode == 0 and os.path.getsize(test_output) > 0:
+                logger.info("✅ NVENC available — GPU encoding enabled (tested successfully)")
+                return True
+            else:
+                logger.warning(f"❌ NVENC test failed (returncode={test_result.returncode}) — falling back to CPU encoding")
+                return False
+        finally:
+            try:
+                os.unlink(test_output)
+            except OSError:
+                pass
+    except Exception as exc:
+        logger.warning(f"NVENC test encoding failed: {exc} — falling back to CPU encoding")
         return False
 
 

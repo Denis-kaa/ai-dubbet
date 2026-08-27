@@ -30,15 +30,24 @@ class TestHasNvenc:
         result = _has_nvenc()
         assert result is False
 
+    @patch("os.path.getsize")
     @patch("backend.services.merger.subprocess.run")
     @patch("backend.services.merger.settings")
-    def test_returns_true_when_nvenc_available(self, mock_settings, mock_run):
-        """Should return True when NVENC is found in FFmpeg encoders."""
+    def test_returns_true_when_nvenc_available(self, mock_settings, mock_run, mock_getsize):
+        """Should return True when NVENC is found and test encoding succeeds."""
         mock_settings.ENABLE_NVENC = True
-        mock_run.return_value = MagicMock(
-            stdout=" V..... h264_nvenc      NVIDIA NVENC H.264 Encoder",
-            returncode=0,
-        )
+        # First call: ffmpeg -encoders (returns NVENC)
+        # Second call: test encoding (succeeds)
+        mock_run.side_effect = [
+            MagicMock(
+                stdout=" V..... h264_nvenc      NVIDIA NVENC H.264 Encoder",
+                returncode=0,
+            ),
+            MagicMock(
+                returncode=0,
+            ),
+        ]
+        mock_getsize.return_value = 1024  # File has content
         _has_nvenc.cache_clear()
         result = _has_nvenc()
         assert result is True
@@ -46,7 +55,7 @@ class TestHasNvenc:
     @patch("backend.services.merger.subprocess.run")
     @patch("backend.services.merger.settings")
     def test_returns_false_when_nvenc_not_found(self, mock_settings, mock_run):
-        """Should return False when NVENC is not found."""
+        """Should return False when NVENC is not found in encoders."""
         mock_settings.ENABLE_NVENC = True
         mock_run.return_value = MagicMock(
             stdout=" V..... libx264      libx264 H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
@@ -58,10 +67,30 @@ class TestHasNvenc:
 
     @patch("backend.services.merger.subprocess.run")
     @patch("backend.services.merger.settings")
-    def test_returns_false_on_error(self, mock_settings, mock_run):
-        """Should return False when FFmpeg command fails."""
+    def test_returns_false_on_encoder_check_error(self, mock_settings, mock_run):
+        """Should return False when FFmpeg encoder check fails."""
         mock_settings.ENABLE_NVENC = True
         mock_run.side_effect = Exception("FFmpeg not found")
+        _has_nvenc.cache_clear()
+        result = _has_nvenc()
+        assert result is False
+
+    @patch("backend.services.merger.subprocess.run")
+    @patch("backend.services.merger.settings")
+    def test_returns_false_when_test_encoding_fails(self, mock_settings, mock_run):
+        """Should return False when NVENC test encoding fails."""
+        mock_settings.ENABLE_NVENC = True
+        # First call: ffmpeg -encoders (returns NVENC)
+        # Second call: test encoding (fails)
+        mock_run.side_effect = [
+            MagicMock(
+                stdout=" V..... h264_nvenc      NVIDIA NVENC H.264 Encoder",
+                returncode=0,
+            ),
+            MagicMock(
+                returncode=255,
+            ),
+        ]
         _has_nvenc.cache_clear()
         result = _has_nvenc()
         assert result is False

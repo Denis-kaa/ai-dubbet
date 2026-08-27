@@ -166,8 +166,10 @@ class Settings(BaseSettings):
     GEMINI_API_KEY_3: str = ""
     GEMINI_MODEL: str = "gemini-3.5-flash"
 
-    # Tarjima provayderi: "openai" | "gemini"
+    # Tarjima provayderi: "openai" | "gemini" | "claude" | "mistral" | "deepseek" | "groq"
     TRANSLATE_PROVIDER: str = "openai"
+    # Fallback ketma-ketligi (vergul bilan ajratilgan)
+    TRANSLATE_FALLBACK_CHAIN: str = "openai,gemini,claude,mistral,deepseek,groq"
 
     # Gemini native TTS (tayyor ovozlar: Autonoe, Charon va h.k.)
     GEMINI_TTS_MODEL: str = "gemini-2.5-flash-preview-tts"
@@ -189,6 +191,56 @@ class Settings(BaseSettings):
     # mavjud bo'lmasligi mumkin (masalan "gemini-3.5-flash" Vertex'da 404).
     GEMINI_VERTEX_TEXT_MODEL: str = "gemini-2.5-flash"
 
+    # ─────────────────────────────────────────────────────────────────────
+    # Qo'shimcha LLM provayderlar
+    # ─────────────────────────────────────────────────────────────────────
+    # Anthropic Claude
+    CLAUDE_API_KEY: str = ""
+    CLAUDE_MODEL: str = "claude-3-5-haiku-20241022"
+
+    # Mistral AI
+    MISTRAL_API_KEY: str = ""
+    MISTRAL_MODEL: str = "mistral-small-latest"
+
+    # DeepSeek (arzon va tez)
+    DEEPSEEK_API_KEY: str = ""
+    DEEPSEEK_MODEL: str = "deepseek-chat"
+    DEEPSEEK_BASE_URL: str = "https://api.deepseek.com"
+
+    # Groq (eng tez inference — LPU chip)
+    GROQ_API_KEY: str = ""
+    GROQ_MODEL: str = "llama-3.1-8b-instant"
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Qo'shimcha TTS provayderlar
+    # ─────────────────────────────────────────────────────────────────────
+    # Amazon Polly
+    AWS_POLLY_ACCESS_KEY: str = ""
+    AWS_POLLY_SECRET_KEY: str = ""
+    AWS_POLLY_REGION: str = "us-east-1"
+    AWS_POLLY_VOICE_MALE: str = "Filiz"  # O'zbek erkak ovozi
+    AWS_POLLY_VOICE_FEMALE: str = "Filiz"  # O'zbek ayol ovozi
+
+    # Google Cloud TTS
+    GOOGLE_CLOUD_TTS_CREDENTIALS: str = ""
+    GOOGLE_CLOUD_TTS_VOICE_MALE: str = "uz-UZ-Wavenet-A"
+    GOOGLE_CLOUD_TTS_VOICE_FEMALE: str = "uz-UZ-Wavenet-B"
+
+    # Play.ht
+    PLAYHT_API_KEY: str = ""
+    PLAYHT_USER_ID: str = ""
+    PLAYHT_VOICE_MALE: str = ""  # Voice ID
+    PLAYHT_VOICE_FEMALE: str = ""  # Voice ID
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Qo'shimcha STT provayderlar
+    # ─────────────────────────────────────────────────────────────────────
+    # AssemblyAI
+    ASSEMBLYAI_API_KEY: str = ""
+
+    # Deepgram
+    DEEPGRAM_API_KEY: str = ""
+
     # Azure TTS
     AZURE_SPEECH_KEY: str = ""
     AZURE_SPEECH_REGION: str = "eastus"
@@ -206,8 +258,10 @@ class Settings(BaseSettings):
     OUTPUT_DIR: str = "./outputs"
 
     # TTS Provider abstraction
-    # Qiymatlar: "elevenlabs" | "azure" | "edge" | "openai" | "gemini" | "uzbekvoice"
+    # Qiymatlar: "elevenlabs" | "azure" | "edge" | "openai" | "gemini" | "uzbekvoice" | "polly" | "playht" | "bark"
     TTS_PROVIDER: str = "edge"
+    # Fallback ketma-ketligi (vergul bilan ajratilgan)
+    TTS_FALLBACK_CHAIN: str = "edge,elevenlabs,azure,gemini,openai,polly,playht"
     # Asosiy provider muvaqqat xatolik bilan (timeout/429/5xx) ishlamasa shu
     # providerga o'tiladi. Doimiy xatolikda (noto'g'ri kalit/kirish) fallback
     # ishlatilmaydi — backend/services/tts/base.py: PermanentTTSError.

@@ -36,6 +36,7 @@ from backend.services.providers.stt_providers import (
     OpenAIWhisperProvider,
     GoogleSTTProvider,
 )
+from backend.services.providers.amazon_polly_provider import AmazonPollyProvider
 
 __all__ = [
     "LLMProvider",
@@ -52,6 +53,8 @@ __all__ = [
     "DeepSeekLLMProvider",
     "GroqLLMProvider",
     "CohereLLMProvider",
+    # TTS Providers
+    "AmazonPollyProvider",
     # STT Providers
     "AssemblyAIProvider",
     "DeepgramProvider",

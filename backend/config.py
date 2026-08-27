@@ -169,7 +169,7 @@ class Settings(BaseSettings):
     # Tarjima provayderi: "openai" | "gemini" | "claude" | "mistral" | "deepseek" | "groq"
     TRANSLATE_PROVIDER: str = "openai"
     # Fallback ketma-ketligi (vergul bilan ajratilgan)
-    TRANSLATE_FALLBACK_CHAIN: str = "openai,gemini,claude,mistral,deepseek,groq"
+    TRANSLATE_FALLBACK_CHAIN: str = "openai,gemini,claude,mistral,deepseek,groq,cohere"
 
     # Gemini native TTS (tayyor ovozlar: Autonoe, Charon va h.k.)
     GEMINI_TTS_MODEL: str = "gemini-2.5-flash-preview-tts"
@@ -210,6 +210,11 @@ class Settings(BaseSettings):
     # Groq (eng tez inference — LPU chip)
     GROQ_API_KEY: str = ""
     GROQ_MODEL: str = "llama-3.1-8b-instant"
+
+    # Cohere (arzon va sifatli, RAG qo'llab-quvvatlaydi)
+    COHERE_API_KEY: str = ""
+    COHERE_MODEL: str = "command-r-plus"
+    COHERE_LIGHT_MODEL: str = "command-r"
 
     # ─────────────────────────────────────────────────────────────────────
     # Qo'shimcha TTS provayderlar

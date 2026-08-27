@@ -22,6 +22,14 @@ from backend.services.providers.base import (
 )
 from backend.services.providers.registry import ProviderRegistry
 from backend.services.providers.fallback import FallbackChain
+from backend.services.providers.llm_providers import (
+    OpenAILLMProvider,
+    ClaudeLLMProvider,
+    MistralLLMProvider,
+    DeepSeekLLMProvider,
+    GroqLLMProvider,
+)
+from backend.services.providers.cohere_provider import CohereLLMProvider
 
 __all__ = [
     "LLMProvider",
@@ -31,4 +39,11 @@ __all__ = [
     "ProviderHealth",
     "ProviderRegistry",
     "FallbackChain",
+    # LLM Providers
+    "OpenAILLMProvider",
+    "ClaudeLLMProvider",
+    "MistralLLMProvider",
+    "DeepSeekLLMProvider",
+    "GroqLLMProvider",
+    "CohereLLMProvider",
 ]

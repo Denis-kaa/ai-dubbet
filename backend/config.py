@@ -240,11 +240,20 @@ class Settings(BaseSettings):
     # ─────────────────────────────────────────────────────────────────────
     # Qo'shimcha STT provayderlar
     # ─────────────────────────────────────────────────────────────────────
-    # AssemblyAI
+    # AssemblyAI (yuqori aniqlik, real-time)
     ASSEMBLYAI_API_KEY: str = ""
 
-    # Deepgram
+    # Deepgram (juda tez, arzon)
     DEEPGRAM_API_KEY: str = ""
+
+    # Google Cloud Speech-to-Text
+    GOOGLE_STT_CREDENTIALS: str = ""
+
+    # STT Provider tanlash
+    # Qiymatlar: "openai_whisper" | "assemblyai" | "deepgram" | "google_stt" | "gemini"
+    STT_PROVIDER: str = "openai_whisper"
+    # Fallback ketma-ketligi (vergul bilan ajratilgan)
+    STT_FALLBACK_CHAIN: str = "openai_whisper,assemblyai,deepgram,gemini,google_stt"
 
     # Azure TTS
     AZURE_SPEECH_KEY: str = ""

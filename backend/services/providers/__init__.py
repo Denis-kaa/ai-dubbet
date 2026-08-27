@@ -30,6 +30,12 @@ from backend.services.providers.llm_providers import (
     GroqLLMProvider,
 )
 from backend.services.providers.cohere_provider import CohereLLMProvider
+from backend.services.providers.stt_providers import (
+    AssemblyAIProvider,
+    DeepgramProvider,
+    OpenAIWhisperProvider,
+    GoogleSTTProvider,
+)
 
 __all__ = [
     "LLMProvider",
@@ -46,4 +52,9 @@ __all__ = [
     "DeepSeekLLMProvider",
     "GroqLLMProvider",
     "CohereLLMProvider",
+    # STT Providers
+    "AssemblyAIProvider",
+    "DeepgramProvider",
+    "OpenAIWhisperProvider",
+    "GoogleSTTProvider",
 ]

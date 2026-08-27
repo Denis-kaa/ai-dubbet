@@ -1,0 +1,41 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "Frontend (Next.js)",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "cwd": "/Users/user/Desktop/ai-dubber/frontend",
+      "port": 3000
+    },
+    {
+      "name": "Backend + Worker + DB (Docker Compose)",
+      "runtimeExecutable": "/usr/local/bin/docker",
+      "runtimeArgs": ["compose", "up"],
+      "cwd": "/Users/user/Desktop/ai-dubber",
+      "port": 8000
+    },
+    {
+      "name": "Download Service (Host)",
+      "runtimeExecutable": "./venv/bin/python3",
+      "runtimeArgs": ["download_service.py"],
+      "cwd": "/Users/user/Desktop/ai-dubber",
+      "port": 8001
+    },
+    {
+      "name": "Flower Monitor (Celery UI)",
+      "runtimeExecutable": "/usr/local/bin/docker",
+      "runtimeArgs": ["compose", "up", "flower"],
+      "cwd": "/Users/user/Desktop/ai-dubber",
+      "port": 5555,
+      "autoPort": true
+    },
+    {
+      "name": "mobile-web",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["expo", "start", "--web"],
+      "cwd": "/Users/user/Desktop/ai-dubber/mobile",
+      "port": 8081
+    }
+  ]
+}

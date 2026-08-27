@@ -1,0 +1,64 @@
+name: Node.js CI/CD
+
+# DISABLED 2026-08-05 — manual runs only.
+#
+# The rsync below copies .next/standalone/ straight to the app root, but because
+# the repo root holds a package-lock.json, Next treats it as the workspace root
+# and emits .next/standalone/frontend/server.js. So server.js lands at
+# app/frontend/server.js and the systemd unit finds nothing to run.
+# Deploys are done by hand until that path is corrected.
+#
+# Nothing below is removed. To re-enable automatic runs, restore:
+#   push:
+#     branches:
+#       - main
+#   pull_request:
+#     branches:
+#       - main
+on:
+  workflow_dispatch:
+
+# Define jobs for the workflow
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy using SSH
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: 22
+          script: |
+            set -e  # Stop execution if any command fails
+
+            # Source the NVM to ensure using the right Node.js version
+            [ -s "$HOME/.nvm/nvm.sh" ] && \. "$HOME/.nvm/nvm.sh"
+            echo "Node.js version: $(node -v)"
+
+            # Change to the project directory
+            cd ~/ai-dubber
+            echo "Changed directory to ~/ai-dubber"
+
+            # Pull the latest code from the current branch instead of hardcoding main
+            # (or stay on main but ensure we have the latest)
+            git fetch origin main
+            git reset --hard origin/main
+            git clean -fd
+            echo "Git pull completed successfully."
+
+            docker compose up -d --build
+
+            cd frontend
+            npm install
+            npm run build
+
+            sudo mkdir -p /var/www/xadichai.uz/app/.next
+            sudo rsync -a --delete .next/standalone/ /var/www/xadichai.uz/app/
+            sudo rsync -a --delete .next/static/ /var/www/xadichai.uz/app/.next/static/
+            if [ -d "public" ]; then
+              sudo rsync -a --delete public/ /var/www/xadichai.uz/app/public/
+            fi
+            sudo systemctl restart xadichai-frontend

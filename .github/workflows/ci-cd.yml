@@ -1,0 +1,442 @@
+name: CI/CD Pipeline
+
+# DISABLED 2026-08-05 — manual runs only.
+#
+# This pipeline deploys to /home/ubuntu/ai-dubber and overwrites
+# /etc/nginx/sites-available/xadichai from scratch. Production actually runs from
+# /var/www/xadichai.uz/app via the xadichai-frontend systemd unit, and the live
+# nginx config carries the www->apex redirect plus the api.xadichai.uz vhost,
+# neither of which this file reproduces. Running it would break the site.
+#
+# Nothing below is removed. To re-enable automatic runs, restore:
+#   push:
+#     branches: [main, develop]
+#     paths:
+#       - '**'
+#       - '!.next/**'
+#       - '!.venv/**'
+#       - '!node_modules/**'
+#   pull_request:
+#     branches: [main, develop]
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Test Frontend & Backend
+    runs-on: ubuntu-latest
+
+    env:
+      NODE_ENV: test
+      BACKEND_ENV: test
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: dubber_test
+          POSTGRES_PASSWORD: dubber_test_pw
+          POSTGRES_DB: dubber_test_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Python dependencies
+        run: |
+          cd backend
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+        working-directory: ${{ github.workspace }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: ${{ github.workspace }}/frontend
+
+      - name: Run backend tests
+        run: |
+          cd backend
+          python -m pytest tests -v --tb=short || true
+        working-directory: ${{ github.workspace }}
+        env:
+          DATABASE_URL: postgresql://dubber_test:dubber_test_pw@localhost:5432/dubber_test_db
+          ASYNC_DATABASE_URL: postgresql+asyncpg://dubber_test:dubber_test_pw@localhost:5432/dubber_test_db
+          REDIS_URL: redis://localhost:6379/0
+          CELERY_BROKER_URL: redis://localhost:6379/0
+          CELERY_RESULT_BACKEND: redis://localhost:6379/0
+          OPENAI_API_KEY: sk-test-key
+          AZURE_SPEECH_KEY: test-key
+          AZURE_SPEECH_REGION: eastus
+          DEBUG: "true"
+        timeout-minutes: 15
+
+      - name: Run frontend tests
+        run: npm run lint
+        working-directory: ${{ github.workspace }}/frontend
+        timeout-minutes: 10
+
+      - name: Build frontend
+        run: npm run build
+        working-directory: ${{ github.workspace }}/frontend
+        timeout-minutes: 15
+
+  build:
+    name: Build Frontend for Deployment
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: ${{ github.workspace }}/frontend
+
+      - name: Build frontend
+        run: npm run build
+        working-directory: ${{ github.workspace }}/frontend
+        env:
+          NEXT_PUBLIC_API_URL: https://xadichai.uz/api
+          NEXT_PUBLIC_GRAPHQL_URL: https://xadichai.uz/graphql
+        timeout-minutes: 15
+
+      - name: Save artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-artifacts
+          path: frontend/.next/
+          retention-days: 1
+
+  deploy:
+    name: Deploy to Server
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Checkout artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-artifacts
+          path: build-artifacts
+
+      - name: Deploy to Ubuntu Server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: 51.21.35.247
+          username: ubuntu
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -e
+
+            echo "=== Starting Deployment ==="
+            echo ""
+
+            # Create deployment directory
+            mkdir -p /home/ubuntu/ai-dubber
+
+            # Pull latest code
+            cd /home/ubuntu/ai-dubber
+            if [ -d .git ]; then
+              git pull origin main
+            else
+              echo "New deployment - setting up repository"
+              git init
+              git remote add origin https://github.com/AzimUmarov/ai-dubber.git
+              git fetch origin main
+              git checkout origin/main
+            fi
+
+            # Stop services
+            echo "Stopping services..."
+            sudo supervisorctl stop ai-dubber-api ai-dubber-worker ai-dubber-frontend || true
+
+            # Setup environment file safely
+            echo ""
+            echo "Setting up environment file..."
+            if [ ! -f .env ]; then
+              touch .env
+            fi
+            chmod 600 .env
+            
+            # Force update Click credentials and environment variables in server .env
+            sed -i '/^CLICK_MERCHANT_ID=/d' .env 2>/dev/null || true
+            sed -i '/^CLICK_SERVICE_ID=/d' .env 2>/dev/null || true
+            sed -i '/^CLICK_SECRET_KEY=/d' .env 2>/dev/null || true
+            sed -i '/^CLICK_MERCHANT_USER_ID=/d' .env 2>/dev/null || true
+            sed -i '/^FRONTEND_URL=/d' .env 2>/dev/null || true
+
+            echo 'CLICK_MERCHANT_ID="56653"' >> .env
+            echo 'CLICK_SERVICE_ID="108780"' >> .env
+            echo 'CLICK_SECRET_KEY="Pbxfw7SaMso"' >> .env
+            echo 'CLICK_MERCHANT_USER_ID="89102"' >> .env
+            echo 'FRONTEND_URL="https://xadichai.uz"' >> .env
+
+            grep -q "DATABASE_URL=" .env || echo 'DATABASE_URL="postgresql://dubber:dubber123@localhost:5432/dubber_db"' >> .env
+            grep -q "ASYNC_DATABASE_URL=" .env || echo 'ASYNC_DATABASE_URL="postgresql+asyncpg://dubber:dubber123@localhost:5432/dubber_db"' >> .env
+            grep -q "REDIS_URL=" .env || echo 'REDIS_URL="redis://localhost:6379/0"' >> .env
+            grep -q "CELERY_BROKER_URL=" .env || echo 'CELERY_BROKER_URL="redis://localhost:6379/0"' >> .env
+            grep -q "CELERY_RESULT_BACKEND=" .env || echo 'CELERY_RESULT_BACKEND="redis://localhost:6379/0"' >> .env
+
+            # Install system packages and dependencies
+            echo ""
+            echo "Installing system dependencies..."
+            sudo apt-get update -y
+            sudo apt-get install -y python3-pip python3-venv postgresql redis-server nginx supervisor certbot python3-certbot-nginx nodejs npm build-essential
+
+            # Create virtual environment and install backend
+            echo ""
+            echo "Setting up Python environment..."
+            sudo rm -rf venv
+            python3 -m venv venv
+            . venv/bin/activate
+            pip install --upgrade pip
+            pip install -r requirements.txt
+
+            # Install frontend dependencies and build
+            echo ""
+            echo "Building frontend..."
+            cd frontend
+            npm install
+            export NEXT_PUBLIC_API_URL="https://xadichai.uz/api"
+            export NEXT_PUBLIC_GRAPHQL_URL="https://xadichai.uz/graphql"
+            npm run build
+
+            # Prepare standalone assets
+            cp -r public .next/standalone/public || true
+            mkdir -p .next/standalone/.next
+            cp -r .next/static .next/standalone/.next/static || true
+
+            cd ..
+
+            # Setup supervisor configuration
+            echo ""
+            echo "Setting up supervisor..."
+            sudo cat > /etc/supervisor/conf.d/xadichai.conf << 'EOF'
+[program:ai-dubber-frontend]
+command=node /home/ubuntu/ai-dubber/frontend/.next/standalone/server.js
+directory=/home/ubuntu/ai-dubber/frontend
+user=ubuntu
+autostart=true
+autorestart=true
+redirect_stderr=true
+stdout_logfile=/var/log/ai-dubber/frontend.log
+stderr_logfile=/var/log/ai-dubber/frontend_err.log
+environment=PORT="3000",NODE_ENV="production"
+stopwaitsecs=10
+
+[program:ai-dubber-api]
+command=/home/ubuntu/ai-dubber/venv/bin/python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
+directory=/home/ubuntu/ai-dubber
+user=ubuntu
+autostart=true
+autorestart=true
+redirect_stderr=true
+stdout_logfile=/var/log/ai-dubber/api.log
+stderr_logfile=/var/log/ai-dubber/api_err.log
+environment=PYTHONPATH="/home/ubuntu/ai-dubber"
+stopwaitsecs=10
+
+[program:ai-dubber-worker]
+command=/home/ubuntu/ai-dubber/venv/bin/celery -A backend.workers.celery_app worker -l info -Q video_processing -c 2
+directory=/home/ubuntu/ai-dubber
+user=ubuntu
+autostart=true
+autorestart=true
+redirect_stderr=true
+stdout_logfile=/var/log/ai-dubber/worker.log
+stderr_logfile=/var/log/ai-dubber/worker_err.log
+environment=PYTHONPATH="/home/ubuntu/ai-dubber"
+stopwaitsecs=10
+EOF
+
+            # Setup nginx configuration
+            echo ""
+            echo "Setting up nginx configuration..."
+            sudo cat > /etc/nginx/sites-available/xadichai << 'NGINXCONFIG'
+server {
+    listen 80;
+    listen [::]:80;
+    server_name xadichai.uz;
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name xadichai.uz;
+
+    ssl_certificate /etc/letsencrypt/live/xadichai.uz/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/xadichai.uz/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+    location /_next/static/ {
+        alias /home/ubuntu/ai-dubber/frontend/.next/standalone/.next/static/;
+        expires 365d;
+        access_log off;
+        add_header Cache-Control "public, max-age=31536000, immutable";
+    }
+
+    location /api/ {
+        proxy_pass http://127.0.0.1:8000/api/;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
+    }
+
+    location /graphql {
+        proxy_pass http://127.0.0.1:8000/graphql;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location /health {
+        proxy_pass http://127.0.0.1:8000/health;
+        access_log off;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+NGINXCONFIG
+
+            # Setup nginx for API subdomain
+            sudo mkdir -p /etc/nginx/sites-enabled
+            ln -sf /etc/nginx/sites-available/xadichai /etc/nginx/sites-enabled/xadichai
+
+            # Reload nginx
+            echo ""
+            echo "Reloading nginx..."
+            sudo nginx -t
+            sudo systemctl reload nginx
+
+            # Restart Docker services (server uses Docker Compose)
+            echo ""
+            echo "Restarting Docker services..."
+            cd /home/ubuntu/ai-dubber
+            docker compose up -d --build backend worker
+
+            echo ""
+            echo "Waiting for services to start..."
+            sleep 5
+
+            echo ""
+            echo "=== Deployment Complete ==="
+            echo ""
+            echo "Checking service status..."
+            docker compose ps
+
+            echo ""
+            echo "Testing API health..."
+            if curl -f http://localhost:8000/health; then
+              echo "✓ API is healthy"
+            else
+              echo "✗ API health check failed"
+            fi
+
+            echo ""
+            echo "Testing frontend..."
+            if curl -f http://localhost:8000/; then
+              echo "✓ Frontend is accessible"
+            else
+              echo "✗ Frontend is not accessible"
+            fi
+
+      - name: Setup SSL with Certbot
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: 51.21.35.247
+          username: ubuntu
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -e
+
+            echo "Setting up SSL certificate..."
+            if [ -d /etc/letsencrypt/live/xadichai.uz ]; then
+              echo "Certificate already exists"
+            else
+              certbot certonly --nginx -d xadichai.uz --agree-tos --non-interactive \
+                --email contact@xadichai.uz || {
+                  echo "Certbot failed - SSL domain not configured"
+                  echo "You may need to set DNS for xadichai.uz first"
+                }
+            fi
+
+            if [ -d /etc/letsencrypt/live/xadichai.uz ]; then
+              echo "SSL certificate setup complete"
+              sudo nginx -t
+              sudo systemctl reload nginx
+            else
+              echo "SSL not setup - running on HTTP only"
+            fi

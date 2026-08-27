@@ -1,0 +1,37 @@
+# ── Secrets ──────────────────────────────────────────
+.env
+.env*
+cookies.txt
+*.txt
+!frontend/public/robots.txt
+!mobile/.env.example
+
+# ── Python ───────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# ── Logs ─────────────────────────────────────────────
+*.log
+
+# ── Upload / Output (runtime data) ───────────────────
+uploads/
+outputs/
+
+# ── Next.js ──────────────────────────────────────────
+frontend/.next/
+frontend/node_modules/
+frontend/out/
+frontend/tsconfig.tsbuildinfo
+
+# ── Keys ─────────────────────────────────────────────
+*.pem
+
+# ── macOS ────────────────────────────────────────────
+.DS_Store

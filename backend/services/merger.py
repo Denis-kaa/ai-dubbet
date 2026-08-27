@@ -1,5 +1,6 @@
 import subprocess
 import logging
+import functools
 from pathlib import Path
 
 from backend.config import get_settings
@@ -8,6 +9,88 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 _MIX_SAMPLE_RATE = 44100
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NVENC GPU Encoding — NVIDIA GPU bilan tezroq video encoding.
+# Agar serverda NVENC mavjud bo'lsa, avtomatik ishlatiladi.
+# Yo'q bo'lsa — CPU (libx264) ga fallback.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@functools.lru_cache(maxsize=1)
+def _has_nvenc() -> bool:
+    """
+    FFmpeg NVENC mavjudligini tekshirish (keshlangan — bir marta tekshiriladi).
+
+    NVENC = NVIDIA Encoder — GPU'da video encoding.
+    Afzalliklari:
+    - 3-5x tezroq CPU (libx264) ga nisbatan
+    - Kamroq CPU yuklanishi
+    - Xotira tejash (GPU VRAM ishlatiladi)
+
+    Talablar:
+    - NVIDIA GPU (T4, A5000, A10G, RTX 4090, va h.k.)
+    - FFmpeg NVENC support (--enable-nvenc bilan build qilingan)
+    - NVIDIA driver 418+ version
+    """
+    if not settings.ENABLE_NVENC:
+        logger.info("NVENC disabled via config (ENABLE_NVENC=False)")
+        return False
+
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-encoders"],
+            capture_output=True, text=True, timeout=10,
+        )
+        has = "h264_nvenc" in result.stdout
+        if has:
+            logger.info("✅ NVENC available — GPU encoding enabled")
+        else:
+            logger.warning("❌ NVENC not found in FFmpeg — falling back to CPU encoding")
+        return has
+    except Exception as exc:
+        logger.warning(f"NVENC check failed: {exc} — falling back to CPU encoding")
+        return False
+
+
+def _get_video_codec() -> tuple[str, list[str]]:
+    """
+    Video kodekkni tanlash: NVENC (GPU) yoki libx264 (CPU).
+
+    Returns:
+        (codec_name, codec_args) — FFmpeg uchun kodek va uning argumentlari
+    """
+    if _has_nvenc():
+        codec = "h264_nvenc"
+        args = [
+            "-preset", settings.NVENC_PRESET,
+            "-tune", settings.NVENC_TUNE,
+            "-rc", settings.NVENC_RC,
+            "-cq", str(settings.NVENC_CQ),
+            "-b:v", "0",  # VBR mode'da bitrate avtomatik
+        ]
+        logger.info(f"Using NVENC GPU encoding: preset={settings.NVENC_PRESET}, "
+                   f"tune={settings.NVENC_TUNE}, cq={settings.NVENC_CQ}")
+    else:
+        codec = "libx264"
+        args = [
+            "-preset", "ultrafast",
+            "-crf", "23",
+            "-tune", "zerolatency",
+            "-threads", "0",
+        ]
+        logger.info("Using CPU encoding: libx264, preset=ultrafast, crf=23")
+
+    return codec, args
+
+
+def _get_video_codec_for_chunk(chunk_index: int) -> tuple[str, list[str]]:
+    """
+    Chunk uchun video kodekkni tanlash.
+
+    Chunked pipeline'da har bir chunk mustaqil qayta ishlanadi,
+    shuning uchun NVENC bir xil ishlatiladi (keshlangan).
+    """
+    return _get_video_codec()
 
 
 def _get_duration(file_path: str) -> float:
@@ -115,6 +198,9 @@ def merge_video_audio(
     track as the only output audio, so the original speech cannot mask it.
     ``AUDIO_MIX_MODE=ducked_mix`` keeps the legacy original+TTS ducking mix.
 
+    NVENC GPU encoding (agar mavjud bo'lsa) avtomatik ishlatiladi.
+    NVENC yo'q bo'lsa — CPU (libx264) ga fallback.
+
     Agar o'zbekcha dublyaj video dan uzunroq bo'lsa:
     → Video oxirgi kadri "freeze" qilinadi (qora ekran emas, tabiiy tugatish)
 
@@ -129,8 +215,10 @@ def merge_video_audio(
     audio_dur = _get_duration(dubbed_audio_path)
 
     audio_filter = _build_audio_filtergraph(audio_mix_mode)
+    codec, codec_args = _get_video_codec()
 
     if audio_dur <= video_dur:
+        # Oddiy holat: audio qisqa yoki teng — video codec copy (tez)
         filter_complex = audio_filter
         cmd = [
             "ffmpeg", "-y",
@@ -139,7 +227,7 @@ def merge_video_audio(
             "-filter_complex", filter_complex,
             "-map", "0:v:0",
             "-map", "[final]",
-            "-c:v", "copy",
+            "-c:v", "copy",  # copy — bez transcoding (eng tez)
             "-c:a", "aac", "-b:a", "192k",
             "-movflags", "+faststart",
             output_path,
@@ -161,7 +249,8 @@ def merge_video_audio(
             "-filter_complex", filter_complex,
             "-map", "[v]",
             "-map", "[final]",
-            "-c:v", "libx264", "-crf", "22", "-preset", "ultrafast", "-tune", "zerolatency", "-threads", "0",
+            "-c:v", codec,  # NVENC yoki libx264
+            *codec_args,     # kodek argumentlari
             "-c:a", "aac", "-b:a", "192k",
             "-movflags", "+faststart",
             output_path,
@@ -192,6 +281,8 @@ def merge_video_audio_chunk(
     Chunked pipeline uchun ishlatiladi — har bir chunk mustaqil ravishda
     qayta ishlanadi, keyin barcha chunk'lar birlashtiriladi.
 
+    NVENC GPU encoding (agar mavjud bo'lsa) avtomatik ishlatiladi.
+
     Args:
         video_chunk_path: Video chunk fayl yo'li (3-5 daqiqa)
         dubbed_audio_path: Dublyaj audio fayl yo'li (shu chunk uchun)
@@ -207,15 +298,11 @@ def merge_video_audio_chunk(
     video_dur = _get_duration(video_chunk_path)
     audio_dur = _get_duration(dubbed_audio_path)
 
-    # Agar audio chunkdan uzunroq — video oxirgi kadrini freeze qilish
-    if audio_dur > video_dur:
-        extra = audio_dur - video_dur
-        video_dur = audio_dur  # tpad bilan uzaytiramiz
-
     audio_filter = _build_audio_filtergraph(audio_mix_mode)
+    codec, codec_args = _get_video_codec_for_chunk(chunk_index)
 
-    if audio_dur <= _get_duration(video_chunk_path):
-        # Oddiy holat: audio qisqa yoki teng
+    if audio_dur <= video_dur:
+        # Oddiy holat: audio qisqa yoki teng — video codec copy (tez)
         filter_complex = audio_filter
         cmd = [
             "ffmpeg", "-y",
@@ -224,14 +311,14 @@ def merge_video_audio_chunk(
             "-filter_complex", filter_complex,
             "-map", "0:v:0",
             "-map", "[final]",
-            "-c:v", "copy",
+            "-c:v", "copy",  # copy — bez transcoding (eng tez)
             "-c:a", "aac", "-b:a", "192k",
             "-movflags", "+faststart",
             output_path,
         ]
     else:
-        # Audio uzunroq — video freeze
-        extra = audio_dur - _get_duration(video_chunk_path)
+        # Audio uzunroq — video freeze + re-encode
+        extra = audio_dur - video_dur
         filter_complex = (
             f"[0:v]tpad=stop_mode=clone:stop_duration={extra:.3f}[v];"
             f"{audio_filter}"
@@ -243,8 +330,8 @@ def merge_video_audio_chunk(
             "-filter_complex", filter_complex,
             "-map", "[v]",
             "-map", "[final]",
-            "-c:v", "libx264", "-crf", "22", "-preset", "ultrafast",
-            "-tune", "zerolatency", "-threads", "0",
+            "-c:v", codec,  # NVENC yoki libx264
+            *codec_args,     # kodek argumentlari
             "-c:a", "aac", "-b:a", "192k",
             "-movflags", "+faststart",
             output_path,

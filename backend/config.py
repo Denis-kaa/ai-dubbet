@@ -103,6 +103,22 @@ class Settings(BaseSettings):
     # Chunked pipeline ni yoqish/o'chirish. False = eski sequential rejim.
     ENABLE_CHUNKED_PIPELINE: bool = True
 
+    # ─────────────────────────────────────────────────────────────────────
+    # NVENC GPU Encoding — NVIDIA GPU bilan tezroq video encoding.
+    # Agar serverda NVENC mavjud bo'lsa, avtomatik ishlatiladi.
+    # Yo'q bo'lsa — CPU (libx264) ga fallback.
+    # ─────────────────────────────────────────────────────────────────────
+    # NVENC ni yoqish/o'chirish. False = doimo CPU (libx264).
+    ENABLE_NVENC: bool = True
+    # NVENC preset: p1 (eng tez) → p7 (eng sifatli). p1 = max speed.
+    NVENC_PRESET: str = "p1"
+    # NVENC tune: ull (ultra low latency), ll (low latency),hq (high quality)
+    NVENC_TUNE: str = "ull"
+    # NVENC rate control: vbr (variable bitrate), cbr (constant)
+    NVENC_RC: str = "vbr"
+    # NVENC quality (cq): 0-51, past = yuqori sifat. 23 = libx264 CRF 23 ga teng.
+    NVENC_CQ: int = 23
+
     # JWT imzolash kaliti — MAJBURIY .env orqali beriladi. Bo'sh bo'lsa
     # (yoki eski, kodda commit qilingan qiymat ishlatilsa) istalgan kishi
     # o'zi token yasab, istalgan foydalanuvchi (shu jumladan admin) nomidan

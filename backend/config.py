@@ -84,6 +84,25 @@ class Settings(BaseSettings):
     # qiymat kelsa xavfsiz tarzda dubbed_only ga tushadi.
     AUDIO_MIX_MODE: str = "dubbed_only"
 
+    # ─────────────────────────────────────────────────────────────────────
+    # Chunked Pipeline — video va audio ni vaqt bo'yicha qismlarga bo'lib,
+    # TTS va MERGE ni parallel ravishda bajarish (pipeline parallelism).
+    # Natija: ~1.7-2x tezroq ishlash (ba'zan 3x ga yaqin GPU bilan).
+    # ─────────────────────────────────────────────────────────────────────
+    # Har bir chunkning davomiyligi (soniyada). 180 = 3 daqiqa.
+    #kichik qiymat = ko'proq chunklar = ko'proq parallellik, lekin
+    #concat xarajatlari oshadi. Optimal: 120-360 soniya.
+    CHUNK_DURATION_SEC: int = 180
+    # Bir vaqtda qancha chunk parallel qayta ishlanadi.
+    # CPU limitations: 2 chunk = ~4 GB RAM, 3 chunk = ~6 GB RAM.
+    MAX_PARALLEL_CHUNKS: int = 2
+    # Chunklar orasidagi overlap (soniyada) — boundary artifacts
+    # oldini olish uchun. Har bir chunk N секунd OLDINGI chunk bilan
+    # overlap qiladi, keyin裁切 qilinadi.
+    CHUNK_OVERLAP_SEC: float = 1.5
+    # Chunked pipeline ni yoqish/o'chirish. False = eski sequential rejim.
+    ENABLE_CHUNKED_PIPELINE: bool = True
+
     # JWT imzolash kaliti — MAJBURIY .env orqali beriladi. Bo'sh bo'lsa
     # (yoki eski, kodda commit qilingan qiymat ishlatilsa) istalgan kishi
     # o'zi token yasab, istalgan foydalanuvchi (shu jumladan admin) nomidan

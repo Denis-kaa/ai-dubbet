@@ -11,6 +11,12 @@ from openai import OpenAI
 from backend.workers.celery_app import celery_app
 from backend.models.database import SessionLocal, DubbingJob, JobStatus
 from backend.services import downloader, transcriber, translator, speech_optimizer, synthesizer, merger
+from backend.services.chunked_pipeline import (
+    split_video_into_chunks,
+    split_segments_into_chunks,
+    concat_video_chunks,
+    cleanup_chunk_files,
+)
 from backend.services.errors import PermanentError
 from backend.services.content_safety import check_safety
 from backend.models.database import ContentViolation
@@ -452,21 +458,111 @@ def process_video(self: Task, job_id: str) -> dict:
             _update_job(db, job, JobStatus.SYNTHESIZING, 60.0,
                         f"O'zbek ovozi yaratilmoqda ({'ayol' if gender == 'female' else 'erkak'})...")
             tts_dir = str(output_dir / "tts_segments")
-            dubbed_audio_path, actual_timings, qa_results = synthesizer.synthesize_segments(
-                speech_segments, tts_dir, voice_name=voice,
-                video_id=job_id, user_id=(str(job.user_id) if job.user_id else None),
-                existing_qa=job.segment_qa,
-            )
+
+            # Chunked pipeline: video va segmentlarni chunk'larga bo'lib,
+            # TTS + MERGE ni parallel ravishda bajarish (~1.7-2x tezroq).
+            if settings.ENABLE_CHUNKED_PIPELINE:
+                logger.info(f"[JOB {job_id}] Chunked pipeline YONIQ (chunk={settings.CHUNK_DURATION_SEC}s, parallel={settings.MAX_PARALLEL_CHUNKS})")
+                output_dir.mkdir(parents=True, exist_ok=True)
+
+                # Video chunk'larga bo'lish
+                video_chunks = split_video_into_chunks(
+                    video_path, str(output_dir),
+                    chunk_duration_sec=settings.CHUNK_DURATION_SEC,
+                    overlap_sec=settings.CHUNK_OVERLAP_SEC,
+                )
+
+                # Segmentlarni chunk'larga bo'lish
+                segment_chunks = split_segments_into_chunks(speech_segments, video_chunks)
+
+                # Har bir chunk uchun TTS + MERGE parallel
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+
+                def _process_chunk(chunk_idx: int) -> dict:
+                    """Bitta chunk uchun TTS + MERGE."""
+                    chunk_output_dir = str(output_dir / f"chunk_{chunk_idx}_tts")
+                    os.makedirs(chunk_output_dir, exist_ok=True)
+
+                    # TTS uchun bu chunkning segmentlari
+                    chunk_segments = segment_chunks[chunk_idx]
+                    if not chunk_segments:
+                        return {"chunk_idx": chunk_idx, "merged_path": None}
+
+                    # TTS
+                    chunk_audio, chunk_timings, chunk_qa = synthesizer.synthesize_segments(
+                        chunk_segments, chunk_output_dir, voice_name=voice,
+                        video_id=f"{job_id}_c{chunk_idx}",
+                        user_id=(str(job.user_id) if job.user_id else None),
+                        existing_qa=job.segment_qa,
+                    )
+
+                    # MERGE (chunk video + chunk audio)
+                    merged_chunk_path = str(output_dir / f"merged_chunk_{chunk_idx:02d}.mp4")
+                    merger.merge_video_audio_chunk(
+                        video_chunk_path=video_chunks[chunk_idx].video_path,
+                        dubbed_audio_path=chunk_audio,
+                        output_path=merged_chunk_path,
+                        audio_mix_mode=job.audio_mix_mode,
+                        chunk_index=chunk_idx,
+                    )
+
+                    return {
+                        "chunk_idx": chunk_idx,
+                        "merged_path": merged_chunk_path,
+                        "timings": chunk_timings,
+                        "qa": chunk_qa,
+                    }
+
+                # Parallel chunk processing
+                chunk_results = [None] * len(video_chunks)
+                with ThreadPoolExecutor(max_workers=settings.MAX_PARALLEL_CHUNKS) as executor:
+                    future_to_chunk = {
+                        executor.submit(_process_chunk, i): i
+                        for i in range(len(video_chunks))
+                    }
+                    for future in as_completed(future_to_chunk):
+                        chunk_idx = future_to_chunk[future]
+                        try:
+                            result = future.result()
+                            chunk_results[chunk_idx] = result
+                            logger.info(f"[JOB {job_id}] Chunk {chunk_idx}/{len(video_chunks)-1} tayyor")
+                        except Exception as exc:
+                            logger.error(f"[JOB {job_id}] Chunk {chunk_idx} xatosi: {exc}")
+                            raise
+
+                # Barcha chunklarni birlashtirish
+                merged_paths = [r["merged_path"] for r in chunk_results if r and r["merged_path"]]
+                final_output = str(output_dir / "dubbed_final.mp4")
+                concat_video_chunks(merged_paths, final_output)
+
+                # Vaqtinchalik chunk fayllarini tozalash
+                cleanup_chunk_files(video_chunks, str(output_dir))
+
+                # Birlashtirilgan audio (QA uchun)
+                dubbed_audio_path = final_output
+                actual_timings = None  # Chunked pipeline'da aniq timinglar chunk ichida
+                job.segment_qa = {}  # QA results from chunks could be merged here
+
+            else:
+                # Eski sequential rejim (chunked pipeline o'chirilgan bo'lsa)
+                dubbed_audio_path, actual_timings, qa_results = synthesizer.synthesize_segments(
+                    speech_segments, tts_dir, voice_name=voice,
+                    video_id=job_id, user_id=(str(job.user_id) if job.user_id else None),
+                    existing_qa=job.segment_qa,
+                )
+
             job.dubbed_audio_path = dubbed_audio_path
             # Segment darajasidagi QA checkpoint — Celery qayta urinishida
             # faqat muvaffaqiyatsiz/tekshirilmagan segmentlar qayta
             # ishlanadi (synthesizer.py'ning existing_qa parametri orqali).
-            job.segment_qa = qa_results
+            if actual_timings is not None:  # Sequential rejimda
+                job.segment_qa = qa_results
             # Audio gap kesilib qolmasligi uchun original vaqtdan siljigan
             # bo'lishi mumkin (synthesizer.py) — subtitr shu HAQIQIY
             # vaqtlar bilan qayta quriladi, aks holda ovoz bilan mos
             # tushmay qoladi.
-            job.uzbek_srt_content = _segments_to_vtt(actual_timings)
+            if actual_timings is not None:
+                job.uzbek_srt_content = _segments_to_vtt(actual_timings)
             db.commit()
             _record_stage(stage_timings, job_id, "TTS", stage_t0, "ok")
 
@@ -483,12 +579,20 @@ def process_video(self: Task, job_id: str) -> dict:
             final_output = str(output_dir / "dubbed_final.mp4")
             output_dir.mkdir(parents=True, exist_ok=True)
 
-            merger.merge_video_audio(
-                video_path=video_path,
-                dubbed_audio_path=dubbed_audio_path,
-                output_path=final_output,
-                audio_mix_mode=job.audio_mix_mode,
-            )
+            # Agar chunked pipeline ishlatilgan bo'lsa — MERGE allaqachon
+            # chunk'lar ichida bajarilgan va ular birlashtirilgan.
+            # Faqat agar final video hali yo'q bo'lsa — sequential MERGE.
+            if settings.ENABLE_CHUNKED_PIPELINE and Path(final_output).exists():
+                # Chunked pipeline allaqachon final_output ni yaratgan
+                logger.info(f"[JOB {job_id}] MERGE: chunked pipeline allaqachon yakuniy video yaratdi")
+            else:
+                # Sequential MERGE (eski rejim yoki chunked pipeline xatosi)
+                merger.merge_video_audio(
+                    video_path=video_path,
+                    dubbed_audio_path=dubbed_audio_path,
+                    output_path=final_output,
+                    audio_mix_mode=job.audio_mix_mode,
+                )
 
             job.output_video_path = final_output
             job.output_video_url = f"/outputs/{job_id}/dubbed_final.mp4"

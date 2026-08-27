@@ -177,3 +177,82 @@ def merge_video_audio(
         raise RuntimeError(f"FFmpeg xatoligi:\n{result.stderr[-1500:]}")
 
     return output_path
+
+
+def merge_video_audio_chunk(
+    video_chunk_path: str,
+    dubbed_audio_path: str,
+    output_path: str,
+    audio_mix_mode: str | None = None,
+    chunk_index: int = 0,
+) -> str:
+    """
+    Bitta video chunk'ni dublyaj audiosi bilan birlashtirish.
+
+    Chunked pipeline uchun ishlatiladi — har bir chunk mustaqil ravishda
+    qayta ishlanadi, keyin barcha chunk'lar birlashtiriladi.
+
+    Args:
+        video_chunk_path: Video chunk fayl yo'li (3-5 daqiqa)
+        dubbed_audio_path: Dublyaj audio fayl yo'li (shu chunk uchun)
+        output_path: Chiqish fayl yo'li
+        audio_mix_mode: Audio aralashtirish rejimi (default: config'dan)
+        chunk_index: Chunk raqami (logging uchun)
+
+    Returns:
+        Chiqish fayl yo'li
+    """
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+
+    video_dur = _get_duration(video_chunk_path)
+    audio_dur = _get_duration(dubbed_audio_path)
+
+    # Agar audio chunkdan uzunroq — video oxirgi kadrini freeze qilish
+    if audio_dur > video_dur:
+        extra = audio_dur - video_dur
+        video_dur = audio_dur  # tpad bilan uzaytiramiz
+
+    audio_filter = _build_audio_filtergraph(audio_mix_mode)
+
+    if audio_dur <= _get_duration(video_chunk_path):
+        # Oddiy holat: audio qisqa yoki teng
+        filter_complex = audio_filter
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", video_chunk_path,
+            "-i", dubbed_audio_path,
+            "-filter_complex", filter_complex,
+            "-map", "0:v:0",
+            "-map", "[final]",
+            "-c:v", "copy",
+            "-c:a", "aac", "-b:a", "192k",
+            "-movflags", "+faststart",
+            output_path,
+        ]
+    else:
+        # Audio uzunroq — video freeze
+        extra = audio_dur - _get_duration(video_chunk_path)
+        filter_complex = (
+            f"[0:v]tpad=stop_mode=clone:stop_duration={extra:.3f}[v];"
+            f"{audio_filter}"
+        )
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", video_chunk_path,
+            "-i", dubbed_audio_path,
+            "-filter_complex", filter_complex,
+            "-map", "[v]",
+            "-map", "[final]",
+            "-c:v", "libx264", "-crf", "22", "-preset", "ultrafast",
+            "-tune", "zerolatency", "-threads", "0",
+            "-c:a", "aac", "-b:a", "192k",
+            "-movflags", "+faststart",
+            output_path,
+        ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=1200)
+
+    if result.returncode != 0:
+        raise RuntimeError(f"Chunk {chunk_index} FFmpeg xatoligi:\n{result.stderr[-1000:]}")
+
+    return output_path

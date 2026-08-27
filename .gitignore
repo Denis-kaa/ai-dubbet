@@ -35,3 +35,6 @@ frontend/tsconfig.tsbuildinfo
 
 # ── macOS ────────────────────────────────────────────
 .DS_Store
+
+# Archives
+ai-dubber-v1.0.0*.tar.gz

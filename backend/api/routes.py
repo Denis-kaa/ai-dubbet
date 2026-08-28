@@ -206,9 +206,18 @@ async def create_job(
 
 
 @router.get("/jobs/{job_id}")
-def get_job(job_id: uuid.UUID, db: Session = Depends(get_db)) -> JobResponse:
+def get_job(
+    job_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_user),
+) -> JobResponse:
+    """Job ma'lumotlarini olish. Authenticated foydalanuvchi faqat o'zini,
+    anonymous — har qanday tugallangan jobni ko'ra oladi (share link uchun)."""
     job = db.query(DubbingJob).filter(DubbingJob.id == job_id).first()
     if not job:
+        raise HTTPException(status_code=404, detail="Job topilmadi.")
+    # Agar foydalanuvchi tizimga kirgan bo'lsa — faqat o'zini tekshir
+    if current_user and job.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Job topilmadi.")
     return _job_to_response(job)
 
@@ -606,10 +615,17 @@ def delete_job(
 
 
 @router.get("/jobs/{job_id}/subtitles.vtt")
-def get_subtitles(job_id: uuid.UUID, db: Session = Depends(get_db)):
-    """O'zbekcha subtitrlarni WebVTT formatida qaytarish."""
+def get_subtitles(
+    job_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_user),
+):
+    """O'zbekcha subtitrlarni WebVTT formatida qaytarish.
+    Authenticated foydalanuvchi faqat o'zini, anonymous — har qandayni."""
     job = db.query(DubbingJob).filter(DubbingJob.id == job_id).first()
     if not job or not job.uzbek_srt_content:
+        raise HTTPException(status_code=404, detail="Subtitrlar topilmadi.")
+    if current_user and job.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Subtitrlar topilmadi.")
     return Response(
         content=job.uzbek_srt_content,
@@ -619,10 +635,17 @@ def get_subtitles(job_id: uuid.UUID, db: Session = Depends(get_db)):
 
 
 @router.get("/outputs/{job_id}/audio")
-def download_audio(job_id: uuid.UUID, db: Session = Depends(get_db)):
-    """Dublyaj qilingan audioni WAV formatida yuklab olish."""
+def download_audio(
+    job_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_user),
+):
+    """Dublyaj qilingan audioni WAV formatida yuklab olish.
+    Authenticated foydalanuvchi faqat o'zini, anonymous — har qandayni."""
     job = db.query(DubbingJob).filter(DubbingJob.id == job_id).first()
     if not job or job.status != JobStatus.COMPLETED:
+        raise HTTPException(status_code=404, detail="Audio hali tayyor emas.")
+    if current_user and job.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Audio hali tayyor emas.")
 
     settings = get_settings()
@@ -647,9 +670,13 @@ def download_video(
     job_id: uuid.UUID,
     download: bool = Query(False),
     db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_user),
 ):
+    """Video yuklab olish. Authenticated foydalanuvchi faqat o'zini, anonymous — har qandayni."""
     job = db.query(DubbingJob).filter(DubbingJob.id == job_id).first()
     if not job or job.status != JobStatus.COMPLETED:
+        raise HTTPException(status_code=404, detail="Video hali tayyor emas.")
+    if current_user and job.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Video hali tayyor emas.")
 
     settings = get_settings()
@@ -675,11 +702,17 @@ def download_video(
 
 
 @router.get("/jobs/{job_id}/resolutions")
-def list_resolutions(job_id: uuid.UUID, db: Session = Depends(get_db)):
+def list_resolutions(
+    job_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_user),
+):
     """Tarif bo'yicha ruxsat etilgan va tayyor rezolyutsiyalar ro'yxati.
     720p har doim "ready" -- u master fayl, alohida generatsiya kerak emas."""
     job = db.query(DubbingJob).filter(DubbingJob.id == job_id).first()
     if not job or job.status != JobStatus.COMPLETED:
+        raise HTTPException(status_code=404, detail="Video hali tayyor emas.")
+    if current_user and job.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Video hali tayyor emas.")
 
     from backend.services.plans import get_max_resolution_for_job, RESOLUTION_ORDER
@@ -718,6 +751,7 @@ def request_resolution(
     resolution: str,
     download: bool = Query(True),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Berilgan rezolyutsiyani so'raydi -- 720p darhol qaytadi (master fayl),
     360p/1080p mavjud bo'lmasa Celery task navbatga qo'yiladi va "processing"
@@ -725,6 +759,8 @@ def request_resolution(
     Telegram bot ham xuddi shu funksiyani chaqiradi, ikki joyda saqlanmaydi."""
     job = db.query(DubbingJob).filter(DubbingJob.id == job_id).first()
     if not job or job.status != JobStatus.COMPLETED:
+        raise HTTPException(status_code=404, detail="Video hali tayyor emas.")
+    if job.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Video hali tayyor emas.")
 
     from backend.services.resolution_variants import request_resolution as _request_resolution
@@ -744,10 +780,15 @@ def request_resolution(
 @router.post("/jobs/{job_id}/cancel")
 def cancel_job(
     job_id: uuid.UUID,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
+    """Jobni bekor qilish — faqat job egasi. shutil.rmtree ishlatiladi,
+    shuning uchun broken access control juda xavfli."""
     job = db.query(DubbingJob).filter(DubbingJob.id == job_id).first()
     if not job:
+        raise HTTPException(status_code=404, detail="Job topilmadi.")
+    if job.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Job topilmadi.")
     
     active_statuses = [
@@ -831,12 +872,15 @@ def submit_feedback(
     job_id: uuid.UUID,
     req: FeedbackRequest,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     if req.rating < 1 or req.rating > 5:
         raise HTTPException(status_code=400, detail="Baho 1 va 5 orasida bo'lishi kerak.")
 
     job = db.query(DubbingJob).filter(DubbingJob.id == job_id).first()
     if not job:
+        raise HTTPException(status_code=404, detail="Job topilmadi.")
+    if job.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Job topilmadi.")
 
     job.rating = req.rating

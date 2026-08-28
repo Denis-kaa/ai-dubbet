@@ -1,0 +1,18 @@
+{
+  "timestamp": "2026-08-27T19:46:09.883967",
+  "results": [
+    {
+      "codec": "libx264",
+      "preset": "ultrafast",
+      "tune": "zerolatency",
+      "input_file": "/tmp/tmpnlbmuzil.mp4",
+      "input_duration_sec": 10.0,
+      "input_size_mb": 0.4205331802368164,
+      "output_file": "/tmp/tmpudefc5sw.mp4",
+      "output_size_mb": 0.4964628219604492,
+      "encoding_time_sec": 4.54,
+      "fps": 2.2,
+      "speedup_vs_cpu": 0
+    }
+  ]
+}

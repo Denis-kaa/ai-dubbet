@@ -23,9 +23,18 @@ from backend.models.database import ContentViolation
 from backend.services.email_service import send_dubbing_complete_email
 from backend.services.telegram_notify import send_telegram_message
 from backend.config import get_settings
+from backend.services.scheduler import get_scheduler
+from backend.services.backpressure import get_backpressure
+from backend.services.metrics import get_metrics
+from backend.services.sliding_window import ChunkWindow
 
 logger = get_task_logger(__name__)
 settings = get_settings()
+
+# Module-level singletons (lazy — не создают Redis-соединение при импорте)
+_scheduler = get_scheduler()
+_backpressure = get_backpressure()
+_metrics = get_metrics()
 
 # Redis NX-лок против дублей (AUDIT_STABILITY.md §3 P0-1/§4 Шаг 2b):
 # `recover_stuck_*` / ручная повторная отправка / Celery retry могут
@@ -271,6 +280,9 @@ def process_video(self: Task, job_id: str) -> dict:
     pipeline_start = time.monotonic()
     current_stage = "INIT"
 
+    # ─── Scheduler: per-user concurrency check (промт 115 §4) ───
+    user_id_str = None  # будет заполнен после загрузки job
+
     try:
         job = db.query(DubbingJob).filter(DubbingJob.id == job_id).first()
         if not job:
@@ -278,6 +290,15 @@ def process_video(self: Task, job_id: str) -> dict:
 
         job_dir = Path(settings.UPLOAD_DIR) / job_id
         output_dir = Path(settings.OUTPUT_DIR) / job_id
+
+        # Scheduler: per-user limit check
+        user_id_str = str(job.user_id) if job.user_id else "anonymous"
+        if not _scheduler.can_accept_job(user_id_str):
+            logger.warning(f"[JOB {job_id}] Per-user limit reached for {user_id_str} — scheduling deferred")
+        _scheduler.register_active_job(user_id_str, job_id)
+
+        # Metrics: start tracking
+        _metrics.start_job(user_id_str, job_id)
 
         # BOSQICH 1: Yuklash
         # Checkpoint: agar video+audio disk'da hali ham mavjud bo'lsa (masalan
@@ -475,11 +496,22 @@ def process_video(self: Task, job_id: str) -> dict:
                 # Segmentlarni chunk'larga bo'lish
                 segment_chunks = split_segments_into_chunks(speech_segments, video_chunks)
 
-                # Har bir chunk uchun TTS + MERGE parallel
+                # ─── Sliding Window: progressive chunk processing (промт 115 §2) ───
+                chunk_ids = [f"{job_id}_c{i}" for i in range(len(video_chunks))]
+                window = ChunkWindow(job_id=job_id, window_size=settings.MAX_PARALLEL_CHUNKS)
+                window.init_chunks(chunk_ids)
+                _metrics.set_chunks_total(job_id, len(video_chunks))
+                logger.info(f"[JOB {job_id}] Sliding window initialized: {len(video_chunks)} chunks, window={settings.MAX_PARALLEL_CHUNKS}")
+
                 from concurrent.futures import ThreadPoolExecutor, as_completed
+                import threading
+
+                # Backpressure lock для thread-safety
+                _bp_lock = threading.Lock()
 
                 def _process_chunk(chunk_idx: int) -> dict:
-                    """Bitta chunk uchun TTS + MERGE."""
+                    """Bitta chunk uchun TTS + MERGE (backpressure-aware)."""
+                    chunk_id = f"{job_id}_c{chunk_idx}"
                     chunk_output_dir = str(output_dir / f"chunk_{chunk_idx}_tts")
                     os.makedirs(chunk_output_dir, exist_ok=True)
 
@@ -488,6 +520,18 @@ def process_video(self: Task, job_id: str) -> dict:
                     if not chunk_segments:
                         return {"chunk_idx": chunk_idx, "merged_path": None}
 
+                    # ─── Backpressure: ждём пока Media не освободит место (промт 115 §8) ───
+                    with _bp_lock:
+                        while not _backpressure.can_produce_tts(job_id):
+                            backoff = _backpressure.get_backoff_seconds(job_id)
+                            logger.info(f"[JOB {job_id}] Backpressure: TTS throttled for chunk {chunk_idx}, waiting {backoff}s")
+                            time.sleep(backoff)
+                        _backpressure.register_tts_produced(job_id, chunk_id)
+
+                    # ─── Window: mark chunk as processing ───
+                    window.start_chunk(chunk_id)
+                    chunk_t0 = time.monotonic()
+
                     # TTS
                     chunk_audio, chunk_timings, chunk_qa = synthesizer.synthesize_segments(
                         chunk_segments, chunk_output_dir, voice_name=voice,
@@ -495,8 +539,14 @@ def process_video(self: Task, job_id: str) -> dict:
                         user_id=(str(job.user_id) if job.user_id else None),
                         existing_qa=job.segment_qa,
                     )
+                    tts_latency = time.monotonic() - chunk_t0
+                    _metrics.record_tts_latency(job_id, chunk_id, tts_latency)
 
-                    # MERGE (chunk video + chunk audio)
+                    # ─── Media: MERGE (backpressure-tracked) ───
+                    with _bp_lock:
+                        _backpressure.register_media_started(job_id, chunk_id)
+
+                    media_t0 = time.monotonic()
                     merged_chunk_path = str(output_dir / f"merged_chunk_{chunk_idx:02d}.mp4")
                     merger.merge_video_audio_chunk(
                         video_chunk_path=video_chunks[chunk_idx].video_path,
@@ -504,6 +554,26 @@ def process_video(self: Task, job_id: str) -> dict:
                         output_path=merged_chunk_path,
                         audio_mix_mode=job.audio_mix_mode,
                         chunk_index=chunk_idx,
+                    )
+                    media_latency = time.monotonic() - media_t0
+                    _metrics.record_media_latency(job_id, chunk_id, media_latency)
+
+                    # ─── Backpressure: chunk consumed ───
+                    with _bp_lock:
+                        _backpressure.register_media_consumed(job_id, chunk_id)
+                        _backpressure.register_media_finished(job_id, chunk_id)
+
+                    # ─── Window: mark chunk as ready ───
+                    window.complete_chunk(chunk_id)
+                    _metrics.record_chunk_completed(job_id)
+
+                    # ─── TTFP: записать если это ПЕРВЫЙ готовый chunk ───
+                    _metrics.record_ttfp(job_id, chunk_id)
+
+                    logger.info(
+                        f"[JOB {job_id}] Chunk {chunk_idx}/{len(video_chunks)-1} tayyor "
+                        f"(TTS={tts_latency:.1f}s, Media={media_latency:.1f}s, "
+                        f"window_pos={window.get_buffer_status()['window_position']})"
                     )
 
                     return {
@@ -513,22 +583,61 @@ def process_video(self: Task, job_id: str) -> dict:
                         "qa": chunk_qa,
                     }
 
-                # Parallel chunk processing
+                # ─── Sliding window: process chunks respecting window bounds ───
                 chunk_results = [None] * len(video_chunks)
                 with ThreadPoolExecutor(max_workers=settings.MAX_PARALLEL_CHUNKS) as executor:
-                    future_to_chunk = {
-                        executor.submit(_process_chunk, i): i
-                        for i in range(len(video_chunks))
-                    }
-                    for future in as_completed(future_to_chunk):
-                        chunk_idx = future_to_chunk[future]
-                        try:
-                            result = future.result()
-                            chunk_results[chunk_idx] = result
-                            logger.info(f"[JOB {job_id}] Chunk {chunk_idx}/{len(video_chunks)-1} tayyor")
-                        except Exception as exc:
-                            logger.error(f"[JOB {job_id}] Chunk {chunk_idx} xatosi: {exc}")
-                            raise
+                    future_to_chunk = {}
+                    submitted = set()
+
+                    while not window.is_complete():
+                        # Получаем chunks из текущего окна
+                        next_chunks = window.get_next_window()
+                        for chunk_id in next_chunks:
+                            chunk_idx = int(chunk_id.split("_c")[-1])
+                            if chunk_idx not in submitted:
+                                future = executor.submit(_process_chunk, chunk_idx)
+                                future_to_chunk[future] = chunk_idx
+                                submitted.add(chunk_idx)
+
+                        # Ждём завершения хотя бы одного future
+                        if future_to_chunk:
+                            import concurrent.futures as _cf
+                            done, _ = _cf.wait(
+                                future_to_chunk.keys(),
+                                timeout=1.0,
+                                return_when=_cf.FIRST_COMPLETED,
+                            )
+                            for future in done:
+                                chunk_idx = future_to_chunk.pop(future)
+                                try:
+                                    result = future.result()
+                                    chunk_results[chunk_idx] = result
+                                except Exception as exc:
+                                    chunk_id = f"{job_id}_c{chunk_idx}"
+                                    window.fail_chunk(chunk_id, str(exc))
+                                    _metrics.record_chunk_failed(job_id)
+                                    logger.error(f"[JOB {job_id}] Chunk {chunk_idx} xatosi: {exc}")
+                                    raise
+                        else:
+                            # Все chunks submitted, ждём оставшиеся
+                            done, _ = __import__("concurrent.futures", fromlist=["wait"]).wait(
+                                future_to_chunk.keys(),
+                                timeout=1.0,
+                                return_when=__import__("concurrent.futures").FIRST_COMPLETED,
+                            )
+                            for future in done:
+                                chunk_idx = future_to_chunk.pop(future)
+                                try:
+                                    result = future.result()
+                                    chunk_results[chunk_idx] = result
+                                except Exception as exc:
+                                    chunk_id = f"{job_id}_c{chunk_idx}"
+                                    window.fail_chunk(chunk_id, str(exc))
+                                    _metrics.record_chunk_failed(job_id)
+                                    logger.error(f"[JOB {job_id}] Chunk {chunk_idx} xatosi: {exc}")
+                                    raise
+                            if not future_to_chunk:
+                                break
 
                 # Barcha chunklarni birlashtirish
                 merged_paths = [r["merged_path"] for r in chunk_results if r and r["merged_path"]]
@@ -538,6 +647,9 @@ def process_video(self: Task, job_id: str) -> dict:
                 # Vaqtinchalik chunk fayllarini tozalash
                 cleanup_chunk_files(video_chunks, str(output_dir))
 
+                # Backpressure cleanup для этого job
+                _backpressure.cleanup_job(job_id)
+
                 # Birlashtirilgan audio (QA uchun)
                 dubbed_audio_path = final_output
                 actual_timings = None  # Chunked pipeline'da aniq timinglar chunk ichida
@@ -545,11 +657,16 @@ def process_video(self: Task, job_id: str) -> dict:
 
             else:
                 # Eski sequential rejim (chunked pipeline o'chirilgan bo'lsa)
+                _metrics.set_chunks_total(job_id, 1)
+                _backpressure.register_tts_produced(job_id, f"{job_id}_seq")
                 dubbed_audio_path, actual_timings, qa_results = synthesizer.synthesize_segments(
                     speech_segments, tts_dir, voice_name=voice,
                     video_id=job_id, user_id=(str(job.user_id) if job.user_id else None),
                     existing_qa=job.segment_qa,
                 )
+                _backpressure.register_media_consumed(job_id, f"{job_id}_seq")
+                _metrics.record_chunk_completed(job_id)
+                _metrics.record_ttfp(job_id, f"{job_id}_seq")
 
             job.dubbed_audio_path = dubbed_audio_path
             # Segment darajasidagi QA checkpoint — Celery qayta urinishida
@@ -681,6 +798,20 @@ def process_video(self: Task, job_id: str) -> dict:
             )
 
         _cleanup_upload_dir(job_id)
+
+        # ─── Metrics: end tracking ───
+        _metrics.end_job(job_id)
+        job_metrics = _metrics.get_job_metrics(job_id)
+        if job_metrics:
+            logger.info(
+                f"[JOB {job_id}] Metrics: TTFP={job_metrics['ttfp']}s, "
+                f"total={job_metrics['total_processing']}s, "
+                f"chunks={job_metrics['chunks_completed']}/{job_metrics['chunks_total']}"
+            )
+
+        # ─── Scheduler: release job ───
+        _scheduler.release_job(user_id_str, job_id)
+
         _log_pipeline_summary(job_id, stage_timings, pipeline_start, "COMPLETED")
 
         return {"job_id": job_id, "status": "completed", "output_url": job.output_video_url}
@@ -700,6 +831,14 @@ def process_video(self: Task, job_id: str) -> dict:
         except Exception as notify_exc:
             logger.warning(f"[JOB {job_id}] Telegram xabari yuborilmadi: {notify_exc}")
         _cleanup_upload_dir(job_id)
+
+        # ─── Metrics + Scheduler: cleanup on permanent failure ───
+        _metrics.end_job(job_id)
+        _metrics.record_chunk_failed(job_id)
+        if user_id_str:
+            _scheduler.release_job(user_id_str, job_id)
+        _backpressure.cleanup_job(job_id)
+
         _log_pipeline_summary(job_id, stage_timings, pipeline_start, "FAILED (permanent)")
         raise exc
 
@@ -789,6 +928,13 @@ def process_video(self: Task, job_id: str) -> dict:
             logger.warning(f"[JOB {job_id}] Telegram xabari yuborilmadi: {notify_exc}")
 
         _cleanup_upload_dir(job_id)
+
+        # ─── Metrics + Scheduler: cleanup on max retries failure ───
+        _metrics.end_job(job_id)
+        if user_id_str:
+            _scheduler.release_job(user_id_str, job_id)
+        _backpressure.cleanup_job(job_id)
+
         _log_pipeline_summary(job_id, stage_timings, pipeline_start, "FAILED (max retries)")
 
         raise exc

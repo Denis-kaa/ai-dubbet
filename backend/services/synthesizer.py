@@ -233,6 +233,20 @@ def synthesize_segments(
         if pre_synthesized:
             logger.info(f"Batch orqali oldindan tayyorlandi: {len(pre_synthesized)}/{len(segments)} segment")
 
+    # Azure TTS rate-limit: 0.3s interval between requests (prevents 429)
+    import threading as _threading
+    _azure_rate_lock = _threading.Lock()
+    _azure_last_request = [0.0]  # mutable for closure
+
+    def _rate_limit_azure():
+        """Minimal delay between Azure TTS requests to avoid 429 TooManyRequests."""
+        with _azure_rate_lock:
+            now = time.monotonic()
+            elapsed = now - _azure_last_request[0]
+            if elapsed < 0.3:
+                time.sleep(0.3 - elapsed)
+            _azure_last_request[0] = time.monotonic()
+
     def _process_single_segment(idx_seg):
         idx, seg = idx_seg
         text = seg.get("text", "").strip()
@@ -242,6 +256,7 @@ def synthesize_segments(
         if seg["id"] in pre_synthesized:
             engine = get_provider().name
         else:
+            _rate_limit_azure()  # Rate-limit before Azure TTS call
             engine = _synthesize_text(text, str(seg_file), voice_name=voice_name, video_id=video_id, user_id=user_id)
         if seg_file.exists():
             audio = _clean_audio(AudioSegment.from_wav(str(seg_file)))
@@ -258,8 +273,8 @@ def synthesize_segments(
     # ElevenLabs bir vaqtda ko'p so'rovni qabul qilmaydi (concurrency limit) —
     # juda ko'p parallel oqim ba'zi segmentlarni Edge TTS'ga (boshqa ovozga)
     # "fallback" qilib qo'yishi mumkin edi, natijada bitta dublyajda ikki xil
-    # odam ovozi eshitilardi. 5 oqim boshqa bosqichlar bilan mos va xavfsiz.
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    # odam ovozi eshitilardi. 2 oqim — Azure 429 (TooManyRequests) oldini olish.
+    with ThreadPoolExecutor(max_workers=2) as executor:
         raw_results = list(executor.map(_process_single_segment, enumerate(segments)))
 
     # Saralangan segmentlarni yig'ish
@@ -357,7 +372,7 @@ def synthesize_segments(
                         pass
             return item, qa
 
-        with ThreadPoolExecutor(max_workers=5) as executor:
+        with ThreadPoolExecutor(max_workers=2) as executor:
             qa_pairs = list(executor.map(_qa_and_maybe_retry, seg_data))
         seg_data = [pair[0] for pair in qa_pairs]
         for item, qa in qa_pairs:

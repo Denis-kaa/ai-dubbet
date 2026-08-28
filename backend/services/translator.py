@@ -87,8 +87,21 @@ def translate_free_google(text: str, target_lang: str = "uz") -> str:
             data = response.json()
             parts = [item[0] for item in data[0] if item and item[0]]
             return "".join(parts)
+        else:
+            logger.warning(f"Free Google Translate: HTTP {response.status_code}")
     except Exception as e:
         logger.error(f"Free Google Translate API request failed: {e}")
+    # Fallback: deep-translator (MyMemory — bepul, 5000 kunlik limit)
+    try:
+        from deep_translator import MyMemoryTranslator
+        import html as _html
+        result = MyMemoryTranslator(source="english", target="uzbek").translate(text)
+        if result and result != text:
+            result = _html.unescape(result)  # &#39; → '
+            logger.info("deep-translator (MyMemory) ishlatildi")
+            return result
+    except Exception as e:
+        logger.error(f"deep-translator fallback failed: {e}")
     return text
 
 
@@ -339,27 +352,42 @@ def _translate_chunk_gemini(segments: list[dict], clean_segments: list[dict]) ->
             time.sleep(backoff)
 
 
+def _translate_chunk_free_fallback(segments: list[dict]) -> list[dict]:
+    """Free Google Translate fallback — cheksiz, API kalit kerak emas.
+    Sifat pastroq (kitobiy tarjima), lekin pipeline to'xtab qolmaydi."""
+    logger.info("Free Google Translate fallback ishlatilmoqda...")
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        return list(executor.map(_translate_segment_free, segments))
+
+
 def _translate_chunk(segments: list[dict]) -> list[dict]:
     """Bir bo'lak segmentlarni tarjima qilish — TRANSLATE_PROVIDER ga qarab.
 
-    TRANSLATE_PROVIDER="openai" bo'lsa ham, OpenAI muvaffaqiyatsiz bo'lsa
-    (masalan krediti tugasa) Gemini'ga avtomatik o'tadi — aks holda butun
-    video navbatda qotib qoladi (2026-08-09 OpenAI krediti tugash hodisasi
-    sabab qo'shildi)."""
+    Fallback zanjiri: OpenAI → Gemini → Free Google Translate.
+    Har qanday xatoda keyingisiga o'tadi — pipeline hech qachon to'xtamaydi.
+    """
     clean_segments = [
         {**s, 'text': _clean_text(s.get('text', ''))} for s in segments
     ]
 
+    # 1. TRANSLATE_PROVIDER bo'yicha primary provider
     if settings.TRANSLATE_PROVIDER == "gemini":
-        return _translate_chunk_gemini(segments, clean_segments)
+        try:
+            return _translate_chunk_gemini(segments, clean_segments)
+        except Exception as e:
+            logger.warning(f"Gemini tarjima muvaffaqiyatsiz ({e}) — Free Google Translate ga o'tilmoqda.")
+            return _translate_chunk_free_fallback(segments)
 
+    # Default: OpenAI
     try:
         return _translate_chunk_openai(segments, clean_segments)
     except Exception as e:
-        if not (settings.GEMINI_API_KEY or settings.GEMINI_USE_VERTEX):
-            raise
         logger.warning(f"OpenAI tarjima muvaffaqiyatsiz ({e}) — Gemini'ga o'tilmoqda.")
-        return _translate_chunk_gemini(segments, clean_segments)
+        try:
+            return _translate_chunk_gemini(segments, clean_segments)
+        except Exception as e2:
+            logger.warning(f"Gemini ham muvaffaqiyatsiz ({e2}) — Free Google Translate ga o'tilmoqda.")
+            return _translate_chunk_free_fallback(segments)
 
 
 _CALIBRATED_RATE_CACHE: dict = {"value": None, "computed_at": 0.0}

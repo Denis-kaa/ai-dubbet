@@ -308,7 +308,12 @@ def _transcribe_chunk_gemini(chunk_path: Path, offset_seconds: float, language: 
         _build_transcribe_prompt(language),
     ]
 
-    max_attempts = 5
+    # Barcha Gemini kalitlari soni — agar hammasi 429 bo'lsa, darhol tashlaymiz
+    keys = [settings.GEMINI_API_KEY, settings.GEMINI_API_KEY_2, settings.GEMINI_API_KEY_3]
+    total_keys = len([k for k in keys if k])
+    max_attempts = min(5, total_keys + 1)  # kalitlar sonidan ko'p retry qilmaymiz
+    keys_exhausted = 0
+
     for attempt in range(max_attempts):
         try:
             response = _get_gemini_transcribe_client().models.generate_content(
@@ -340,7 +345,11 @@ def _transcribe_chunk_gemini(chunk_path: Path, offset_seconds: float, language: 
             if attempt == max_attempts - 1 or not (is_rate_limit or is_bad_json):
                 raise
             if is_rate_limit:
-                # Исчерпан текущий ключ — переключаемся на запасной.
+                keys_exhausted += 1
+                # Agar barcha kalitlar ishlatilgan — darhol tashlaymiz (200s kutmaslik)
+                if keys_exhausted >= total_keys:
+                    logger.warning(f"Gemini: barcha {total_keys} kalitlar ishlatildi (429) — faster-whisper ga o'tilmoqda")
+                    raise
                 _rotate_gemini_key()
             backoff = (2 ** attempt) + random.uniform(0.1, 1.0) if is_rate_limit else random.uniform(0.3, 1.2)
             logger.warning(f"Gemini transkripsiya xato — qayta urinish {backoff:.2f}s ({attempt + 1}/{max_attempts}): {e}")
@@ -370,9 +379,10 @@ def transcribe_audio(audio_path: str, language: str | None = "en") -> dict:
     if settings.FREE_MODE:
         try:
             from faster_whisper import WhisperModel
-            logger.info("FREE_MODE: Running local faster-whisper transcription (small model on CPU)...")
+            _model_name = settings.WHISPER_MODEL
+            logger.info(f"FREE_MODE: Running local faster-whisper transcription ({_model_name} model on CPU)...")
 
-            model = WhisperModel("tiny", device="cpu", compute_type="int8")
+            model = WhisperModel(_model_name, device="cpu", compute_type="int8")
             segments, info = model.transcribe(audio_path, beam_size=5, language=language)
             
             segments_list = []
@@ -410,13 +420,39 @@ def transcribe_audio(audio_path: str, language: str | None = "en") -> dict:
     detected_language = language
 
     def _transcribe_chunk_with_fallback(cpath: Path, offset: float) -> tuple[list[dict], str, str]:
+        # Fallback chain: OpenAI → Gemini → faster-whisper (local)
         try:
             return _transcribe_chunk(cpath, offset_seconds=offset, language=language)
         except Exception as e:
-            if not (settings.GEMINI_API_KEY or settings.GEMINI_USE_VERTEX):
-                raise
             logger.warning(f"OpenAI transkripsiya muvaffaqiyatsiz ({e}) — Gemini'ga o'tilmoqda.")
-            return _transcribe_chunk_gemini(cpath, offset_seconds=offset, language=language)
+        try:
+            if settings.GEMINI_API_KEY or settings.GEMINI_USE_VERTEX:
+                return _transcribe_chunk_gemini(cpath, offset_seconds=offset, language=language)
+        except Exception as e:
+            logger.warning(f"Gemini transkripsiya ham muvaffaqiyatsiz ({e}) — faster-whisper ga o'tilmoqda.")
+        # Final fallback: local faster-whisper (bepul, API kerak emas)
+        try:
+            from faster_whisper import WhisperModel
+            _model_name = settings.WHISPER_MODEL
+            logger.info(f"faster-whisper: local transkripsiya ishlatilmoqda ({_model_name})...")
+            model = WhisperModel(_model_name, device="cpu", compute_type="int8")
+            segments_iter, info = model.transcribe(str(cpath), beam_size=5, language=language)
+            segments = []
+            text_parts = []
+            for seg in segments_iter:
+                text = seg.text.strip()
+                if not text:
+                    continue
+                text_parts.append(text)
+                segments.append({
+                    "start": round(float(seg.start) + offset, 3),
+                    "end": round(float(seg.end) + offset, 3),
+                    "text": text,
+                })
+            return segments, " ".join(text_parts), info.language or language or "en"
+        except Exception as e2:
+            logger.error(f"faster-whisper ham muvaffaqiyatsiz ({e2}) — barcha transkripsiya provayderlari tugadi.")
+            raise RuntimeError(f"Barcha transkripsiya provayderlari ishlamadi: OpenAI, Gemini, faster-whisper")
 
     with tempfile.TemporaryDirectory(prefix="openai-stt-") as temp_dir:
         chunk_paths = _chunk_audio(audio_path, Path(temp_dir))

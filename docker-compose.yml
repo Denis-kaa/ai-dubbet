@@ -82,19 +82,20 @@ services:
     command: uvicorn backend.main:app --host 0.0.0.0 --port 8000 --workers 4
 
   # ──────────────────────────────
-  # Celery Worker
+  # Celery Worker — Video Processing (download, transcription, translation)
   # ──────────────────────────────
-  worker:
+  worker-video:
     build:
       context: .
       dockerfile: backend/Dockerfile
-    container_name: dubber_worker
+    container_name: dubber_worker_video
     restart: unless-stopped
     environment:
       - DATABASE_URL=postgresql://dubber:dubber123@postgres:5432/dubber_db
       - REDIS_URL=redis://:0061f8931184fe1276650305600d5409df1a3af2692094d5@redis:6379/0
       - CELERY_BROKER_URL=redis://:0061f8931184fe1276650305600d5409df1a3af2692094d5@redis:6379/0
       - CELERY_RESULT_BACKEND=redis://:0061f8931184fe1276650305600d5409df1a3af2692094d5@redis:6379/0
+      - WORKER_TYPE=video
     env_file:
       - .env
     volumes:
@@ -111,7 +112,65 @@ services:
         condition: service_healthy
       pot-provider:
         condition: service_started
-    command: celery -A backend.workers.celery_app worker -l info -Q video_processing_priority,video_processing -c 4
+    command: celery -A backend.workers.celery_app worker -l info -Q video_processing_priority,video_processing -c 2 --hostname=video@%%h
+
+  # ──────────────────────────────
+  # Celery Worker — TTS Processing (speech synthesis)
+  # ──────────────────────────────
+  worker-tts:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: dubber_worker_tts
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=postgresql://dubber:dubber123@postgres:5432/dubber_db
+      - REDIS_URL=redis://:0061f8931184fe1276650305600d5409df1a3af2692094d5@redis:6379/0
+      - CELERY_BROKER_URL=redis://:0061f8931184fe1276650305600d5409df1a3af2692094d5@redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://:0061f8931184fe1276650305600d5409df1a3af2692094d5@redis:6379/0
+      - WORKER_TYPE=tts
+    env_file:
+      - .env
+    volumes:
+      - ./backend:/app/backend
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+      - ${HOME}/.secrets/gapirai:/app/secrets:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A backend.workers.celery_app worker -l info -Q tts_processing -c 4 --hostname=tts@%%h
+
+  # ──────────────────────────────
+  # Celery Worker — Media Processing (FFmpeg merge, HLS)
+  # ──────────────────────────────
+  worker-media:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: dubber_worker_media
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=postgresql://dubber:dubber123@postgres:5432/dubber_db
+      - REDIS_URL=redis://:0061f8931184fe1276650305600d5409df1a3af2692094d5@redis:6379/0
+      - CELERY_BROKER_URL=redis://:0061f8931184fe1276650305600d5409df1a3af2692094d5@redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://:0061f8931184fe1276650305600d5409df1a3af2692094d5@redis:6379/0
+      - WORKER_TYPE=media
+    env_file:
+      - .env
+    volumes:
+      - ./backend:/app/backend
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+      - ${HOME}/.secrets/gapirai:/app/secrets:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A backend.workers.celery_app worker -l info -Q media_processing -c 4 --hostname=media@%%h
 
   # ──────────────────────────────
   # Telegram bot -- to'liq dublyaj xizmati Telegram ichida (backend/telegram_bot.py).

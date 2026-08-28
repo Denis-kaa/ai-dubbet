@@ -12,7 +12,11 @@ class Settings(BaseSettings):
     # tasks.py'ning TTS bosqichiga ulangan). Har bir segment uchun qo'shimcha
     # Whisper chaqiruvi kerak bo'lgani uchun (haqiqiy, doimiy xarajat),
     # kerak bo'lsa kodga tegmasdan o'chirish mumkin.
-    ENABLE_SEGMENT_QA: bool = True
+    # Faster-whisper model: tiny/small/medium/large-v3
+    # tiny=75MB fast worst, small=500MB ok, medium=1.5GB good, large-v3=3GB best
+    WHISPER_MODEL: str = "small"
+
+    ENABLE_SEGMENT_QA: bool = False  # DISABLED: Azure 429 bottleneck, +30% overhead
     SEGMENT_QA_THRESHOLD: float = 0.75
     # Tarjima tayyor bo'lgach, taxminiy TTS davomiyligi original segment
     # uzunligidan shu nisbatdan ko'p oshsa, bitta cheklangan qisqartirish
@@ -118,6 +122,13 @@ class Settings(BaseSettings):
     NVENC_RC: str = "vbr"
     # NVENC quality (cq): 0-51, past = yuqori sifat. 23 = libx264 CRF 23 ga teng.
     NVENC_CQ: int = 23
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Modal GPU — elastic compute (serverless GPU/CPU in cloud).
+    # .env ga MODAL_ENABLED=true va MODAL_API_KEY=modal-xxx qo'shing.
+    # Batafsil: backend/services/modal_integration.py
+    # ─────────────────────────────────────────────────────────────────────
+    MODAL_ENABLED: bool = False
 
     # JWT imzolash kaliti — MAJBURIY .env orqali beriladi. Bo'sh bo'lsa
     # (yoki eski, kodda commit qilingan qiymat ishlatilsa) istalgan kishi
@@ -331,7 +342,7 @@ class Settings(BaseSettings):
 
     # Admin panel — role='admin' bo'lsa ham, faqat shu ro'yxatdagi email
     # kira oladi (vergul bilan ajratilgan). Bo'sh bo'lsa, faqat role tekshiriladi.
-    ADMIN_ALLOWED_EMAILS: str = "lochinbeksetor@gmail.com"
+    ADMIN_ALLOWED_EMAILS: str = "lochinbeksetor@gmail.com,den4ikorm@gmail.com"
 
     # Click Payment
     CLICK_MERCHANT_ID: str = "56653"

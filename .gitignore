@@ -38,3 +38,4 @@ frontend/tsconfig.tsbuildinfo
 
 # Archives
 ai-dubber-v1.0.0*.tar.gz
+\n# Backup archives (too large for git)\nai-dubber-*.tar.gz

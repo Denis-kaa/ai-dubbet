@@ -170,7 +170,7 @@ def _build_yt_opts(extra: dict | None = None, use_cookies: bool = True, proxy_ur
             # video PO token'siz muvaffaqiyatsiz, PO token bilan muvaffaqiyatli
             # bo'ldi). Shuning uchun endi bu yerda, Python opts ichida ham
             # aniq beriladi.
-            "youtubepot-bgutilhttp": {"base_url": ["http://pot-provider:4416"]},
+            "youtubepot-bgutilhttp": {"base_url": ["http://127.0.0.1:4416"]},
         },
     }
 
